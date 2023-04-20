@@ -1,14 +1,15 @@
-"""This is the email plugin for Auto-GPT."""
+"""This is the Github plugin for Auto-GPT."""
 import os
 from typing import Any, Dict, List, Optional, Tuple, TypeVar, TypedDict
 from auto_gpt_plugin_template import AutoGPTPluginTemplate
+from github import Github, Consts
+from github.Repository import Repository
 
-# email imports
-import smtplib
-import email
-import imaplib
-from email.message import EmailMessage
-from email.header import decode_header
+# import autogpt
+# autogpt.commands.web_selenium.browse_website("https://github.com/Significant-Gravitas/Auto-GPT/issues/2689", question)
+
+# import autogpt
+# autogpt.processing.text.summary.summarize_text(url, text, question, None)
 
 PromptGenerator = TypeVar("PromptGenerator")
 
@@ -18,37 +19,126 @@ class Message(TypedDict):
     content: str
 
 
-class AutoGPTPluginEmail(AutoGPTPluginTemplate):
+class Commands:
+    YOUR_USERNAME = "your_username_on_github"
+    CREATE_REPO = "create_repo_on_github"
+    YOUR_REPOS = "your_repositories_on_github"
+    OPEN_REPO = "change_github_repository"
+    GET_NEXT_OPEN_ISSUE = "read_next_open_github_issue"
+    REPLY_TO_ISSUE = "reply_to_last_github_issue"
+
+
+NO_REPO_ERROR_MSG = f"You have not selected a Github Repo. You can view your repositories with the command '{Commands.YOUR_REPOS}' and select a repository with the command '{Commands.OPEN_REPO}'."
+
+
+class AutoGPTGithubPlugin(AutoGPTPluginTemplate):
     """
-    This is the Auto-GPT email plugin.
+    This is the Auto-GPT Github plugin.
     """
 
     def __init__(self):
         super().__init__()
-        self._name = "Auto-GPT-Email-Plugin"
+        self._name = "Auto-GPT-Github-Plugin"
         self._version = "0.1.0"
-        self._description = "Auto-GPT Email Plugin: Supercharge email management."
+        self._description = "Auto-GPT Github Plugin: Supercharge Github management."
+        token = os.getenv("GITHUB_ACCESS_TOKEN")
+        githubURL = os.getenv("GITHUB_BASE_URL")
+        if not githubURL:
+            githubURL = Consts.DEFAULT_BASE_URL
+
+        self.g = Github(base_url=githubURL, login_or_token=token)
+        self.user = self.g.get_user
+        defaultRepo = os.getenv("GITHUB_DEFAULT_REPO")
+        if defaultRepo:
+            self.currentRepo: Repository = self.g.get_repo(defaultRepo)
+        self.readIssueNumbers = []
+
+    def readNextOpenIssue(self):
+        if not self.currentRepo:
+            return NO_REPO_ERROR_MSG
+        open_issues = self.currentRepo.get_issues(state="open")
+        for issue in open_issues:
+            if issue.number in self.readIssueNumbers:
+                continue
+            for reaction in issue.get_reactions():
+                if reaction.content == "+1" and reaction.user == self.user:
+                    continue
+            self.readIssueNumbers.append(issue.number)
+            return f"The issue has the title and text '{issue.title}':'{issue.body}'.\n\nTo reply to this issue, use your command: '{Commands.REPLY_TO_ISSUE}'"
+
+    def replyToLastIssue(self, text):
+        if not self.currentRepo:
+            return NO_REPO_ERROR_MSG
+        if not self.readIssueNumbers:
+            return f"You have not read any Issues. Use the command '{Commands.GET_NEXT_OPEN_ISSUE}' to read your first Github issue."
+        issue = self.currentRepo.get_issue(self.readIssueNumbers[-1])
+        issue.create_comment(text)
+        issue.create_reaction("+1")
+        return f"The comment was successfully added!"
+
+    def getRepositoriesOfCurrentUser(self):
+        repos = self.g.get_user().get_repos()
+        if not repos:
+            return f"Your user {self.g.get_user()} has no Github repositories."
+        result = "The user has the following repositories:\n"
+        for repo in repos:
+            result += f"- The repository with the name '{repo.name}' with {repo.stargazers_count} Github Stars last modified on '{repo.last_modified}';\n"
+        return result
+
+    def openRepo(self, name):
+        repo = self.g.get_user().get_repo(name)
+        if not repo:
+            return f"Github Repository {name} was not found."
+        self.currentRepo = repo
+        return f"You have navigated to the Github Repository '{name}'"
 
     def post_prompt(self, prompt: PromptGenerator) -> PromptGenerator:
+        g = self.g
+        user = g.get_user()
+        """
         prompt.add_command(
-            "Send Email",
-            "send_email",
-            {
-                "to": "<to>",
-                "subject": "<subject>",
-                "body": "<body>"
-            },
-            send_email
+            "Github: Get your username", Commands.YOUR_USERNAME, {}, g.get_user
         )
+
         prompt.add_command(
-            "Read Emails",
-            "read_emails",
+            "create a new Github repository",
+            Commands.CREATE_REPO,
             {
-                "imap_folder": "<imap_folder>",
-                "imap_search_command":
-                "<imap_search_criteria_command>"
+                "name": "<Github Repository Name>",
             },
-            read_emails)
+            user.create_repo,
+        )
+
+        prompt.add_command(
+            "get the names of all your Github repositories",
+            Commands.YOUR_REPOS,
+            {},
+            self.getRepositoriesOfCurrentUser,
+        )
+        """
+        prompt.add_command(
+            "read the next open issue in your current Github repository",
+            Commands.GET_NEXT_OPEN_ISSUE,
+            {},
+            self.readNextOpenIssue,
+        )
+
+        prompt.add_command(
+            f"reply to the last GitHub issue read with '{Commands.GET_NEXT_OPEN_ISSUE}'",
+            Commands.REPLY_TO_ISSUE,
+            {
+                "text": "<text that is used to reply>",
+            },
+            self.replyToLastIssue,
+        )
+
+        prompt.add_command(
+            "Open or Change your Github Repository",
+            Commands.OPEN_REPO,
+            {"name": "<Github Repository Name>"},
+            self.openRepo,
+        )
+
         return prompt
 
     def can_handle_post_prompt(self) -> bool:
@@ -239,102 +329,3 @@ class AutoGPTPluginEmail(AutoGPTPluginTemplate):
             str: The resulting response.
         """
         pass
-
-
-email_sender = os.getenv("EMAIL_ADDRESS")
-email_password = os.getenv("EMAIL_PASSWORD")
-
-
-def send_email(recipient: str, subject: str, message: str) -> str:
-    """Send an email
-
-    Args:
-        recipient (str): The email of the recipients
-        subject (str): The subject of the email
-        message (str): The message content of the email
-
-    Returns:
-        str: Any error messages
-    """
-    smtp_host = os.getenv("EMAIL_SMTP_HOST")
-    smtp_port = os.getenv("EMAIL_SMTP_PORT")
-
-    if not email_sender:
-        return "Error: email not sent. EMAIL_ADDRESS not set in environment."
-    elif not email_password:
-        return "Error: email not sent. EMAIL_PASSWORD not set in environment."
-
-    msg = EmailMessage()
-    msg['Subject'] = subject
-    msg['From'] = email_sender
-    msg['To'] = recipient
-    msg.set_content(message)
-
-    # send email
-    with smtplib.SMTP(smtp_host, smtp_port) as smtp:
-        smtp.starttls()
-        smtp.login(email_sender, email_password)
-        smtp.send_message(msg)
-
-
-def read_emails(imap_folder: str = "inbox", imap_search_command: str = "UNSEEN") -> str:
-    """Read emails
-
-    Args:
-        recipient (str): The email of the recipients
-        subject (str): The subject of the email
-        message (str): The message content of the email
-
-    Returns:
-        str: Any error messages
-    """
-    imap_server = os.getenv("EMAIL_IMAP_SERVER")
-    mark_as_read = os.getenv("EMAIL_MARK_AS_READ")
-
-    mail = imaplib.IMAP4_SSL(imap_server)
-    mail.login(email_sender, email_password)
-    mail.select(imap_folder)
-    _, search_data = mail.search(None, imap_search_command)
-
-    messages = []
-    for num in search_data[0].split():
-        if mark_as_read:
-            _, msg_data = mail.fetch(num, "(BODY.PEEK[])")
-        else:
-            _, msg_data = mail.fetch(num, "(RFC822)")
-        for response_part in msg_data:
-            if isinstance(response_part, tuple):
-                msg = email.message_from_bytes(response_part[1])
-
-                subject, encoding = decode_header(msg["Subject"])[0]
-                if isinstance(subject, bytes):
-                    subject = subject.decode(encoding)
-
-                body = get_email_body(msg)
-                from_address = msg["From"]
-                to_address = msg["To"]
-                date = msg["Date"]
-                cc = msg["CC"] if msg["CC"] else ""
-
-                messages.append({
-                    "From": from_address,
-                    "To": to_address,
-                    "Date": date,
-                    "CC": cc,
-                    "Subject": subject,
-                    "Message Body": body
-                })
-
-    mail.logout()
-    return messages
-
-
-def get_email_body(msg: email.message.Message) -> str:
-    if msg.is_multipart():
-        for part in msg.walk():
-            content_type = part.get_content_type()
-            content_disposition = str(part.get("Content-Disposition"))
-            if content_type == "text/plain" and "attachment" not in content_disposition:
-                return part.get_payload(decode=True).decode()
-    else:
-        return msg.get_payload(decode=True).decode()
